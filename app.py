@@ -1,38 +1,33 @@
 import streamlit as st
 import pandas as pd
 import yagmail
-from io import BytesIO
 
-st.set_page_config(page_title="GST Comparison App", layout="wide")
+st.set_page_config(page_title="GSTIN Reconciliation Tool", layout="wide")
+st.title("📊 GSTIN Reconciliation and Email Notifier")
 
-st.title("📑 GSTIN-Based Excel Comparison & Email Automation")
+st.markdown("Upload **Company** and **Payments** Excel files for comparison.")
 
-# Upload Excel files
-company_file = st.file_uploader("Upload Company Excel File", type=["xlsx"], key="company")
-payments_file = st.file_uploader("Upload Payments Excel File", type=["xlsx"], key="payments")
-
-# Email credentials
-sender_email = st.text_input("Enter Sender Gmail ID")
-sender_password = st.text_input("Enter Sender Gmail Password", type="password")
+# Upload files
+company_file = st.file_uploader("Upload Company Excel File", type=["xlsx"])
+payments_file = st.file_uploader("Upload Payments Excel File", type=["xlsx"])
 
 if company_file and payments_file:
-    # Load Excel files with all sheets
-    company_df_all = pd.read_excel(company_file, sheet_name=None, index_col='GSTIN of supplier')
-    payments_df_all = pd.read_excel(payments_file, sheet_name=None, index_col='GSTIN of supplier')
+    company_data = pd.read_excel(company_file, sheet_name=None, index_col='GSTIN of supplier')
+    payments_data = pd.read_excel(payments_file, sheet_name=None, index_col='GSTIN of supplier')
 
-    common_sheets = set(company_df_all.keys()).intersection(set(payments_df_all.keys()))
-
+    common_sheets = set(company_data.keys()).intersection(set(payments_data.keys()))
+    
     for sheet in common_sheets:
-        st.markdown(f"## 📄 Sheet: {sheet}")
+        st.header(f"🗂️ Sheet: {sheet}")
 
-        df_company = company_df_all[sheet]
-        df_payments = payments_df_all[sheet]
+        df_company = company_data[sheet]
+        df_payments = payments_data[sheet]
 
         if 'Taxable Value (₹)' not in df_company.columns or 'Taxable Value (₹)' not in df_payments.columns:
-            st.warning(f"Missing 'Taxable Value (₹)' in sheet {sheet}")
+            st.warning("Missing 'Taxable Value (₹)' column in one of the files.")
             continue
 
-        # Align by GSTIN
+        # Common GSTINs
         common_gstin = df_company.index.intersection(df_payments.index)
 
         taxable_comparison = pd.DataFrame({
@@ -40,51 +35,44 @@ if company_file and payments_file:
             'Payment_Taxable_Value': df_payments.loc[common_gstin, 'Taxable Value (₹)']
         })
 
-        # Compute difference
-        taxable_comparison['Difference'] = (
-            taxable_comparison['Company_Taxable_Value'] - taxable_comparison['Payment_Taxable_Value']
-        )
-
-        # Add Claim Status
-        taxable_comparison['Claim Status'] = taxable_comparison['Difference'].apply(
-            lambda x: 'Claim GST' if x == 0 else 'Claim Next Month'
-        )
+        taxable_comparison['Difference'] = taxable_comparison['Company_Taxable_Value'] - taxable_comparison['Payment_Taxable_Value']
+        taxable_comparison['Claim Status'] = taxable_comparison['Difference'].apply(lambda x: 'Claim GST' if x == 0 else 'Claim Next Month')
 
         # Filter options
-        filter_option = st.radio(
-            f"🎯 Filter GSTINs in {sheet}:",
-            ('Show All', 'Only Claim GST', 'Only Claim Next Month'),
-            key=f'filter_{sheet}'
-        )
+        filter_option = st.radio("📌 Show GSTINs with:", ["All", "Only Differences", "Only No Differences"], horizontal=True)
 
-        if filter_option == 'Only Claim GST':
-            filtered_df = taxable_comparison[taxable_comparison['Claim Status'] == 'Claim GST']
-        elif filter_option == 'Only Claim Next Month':
-            filtered_df = taxable_comparison[taxable_comparison['Claim Status'] == 'Claim Next Month']
+        if filter_option == "Only Differences":
+            filtered_df = taxable_comparison[taxable_comparison['Difference'] != 0]
+        elif filter_option == "Only No Differences":
+            filtered_df = taxable_comparison[taxable_comparison['Difference'] == 0]
         else:
             filtered_df = taxable_comparison
 
-        # Conditional styling
-        def highlight_status(row):
-            color = 'lightgreen' if row['Claim Status'] == 'Claim GST' else 'lightyellow'
-            return ['background-color: {}'.format(color) if col == 'Claim Status' else '' for col in row.index]
-
         st.markdown("### 🔍 GSTIN Comparison Result")
-        st.dataframe(filtered_df.style.apply(highlight_status, axis=1), use_container_width=True)
+        st.dataframe(filtered_df, use_container_width=True)
 
-        # Records in payments but not in company
+        # Records in Payments but not in Company
         unmatched_gstin = df_payments.index.difference(df_company.index)
         unmatched_records = df_payments.loc[unmatched_gstin]
 
-        st.markdown("### 🚨 Invoices in Payments Sheet but Missing in Company Sheet")
-        st.dataframe(unmatched_records)
+        st.markdown("### ⚠️ Records Present in Payments but Missing in Company")
+        st.dataframe(unmatched_records, use_container_width=True)
 
-        # Button to trigger email sending
-        if sender_email and sender_password:
-            if st.button(f"📧 Send Emails for Missing Records in {sheet}", key=f'email_{sheet}'):
+        # Email Section
+        st.markdown("---")
+        st.markdown("### 📧 Send Emails to Unmatched Suppliers")
+
+        sender_email = st.text_input("Enter Sender Gmail Address")
+        sender_password = st.text_input("Enter Sender Gmail App Password", type="password")
+
+        if st.button("Send Emails"):
+            if not sender_email or not sender_password:
+                st.error("Sender email and password must be provided.")
+            else:
                 try:
                     yag = yagmail.SMTP(user=sender_email, password=sender_password)
-                    sent = 0
+                    success_count = 0
+
                     for gstin in unmatched_records.index:
                         row = unmatched_records.loc[gstin]
                         email = row.get('email')
@@ -95,18 +83,21 @@ if company_file and payments_file:
                             body = f"""
 Dear {name},
 
-Our system shows that your invoice with GSTIN {gstin} is present in our payment records but missing from our internal records.
+Our system shows that your invoice with GSTIN {gstin} is present in our payment records
+but missing from our internal filing system.
 
-Kindly share the corresponding invoice/documents at the earliest so we can reconcile.
+Kindly share the corresponding invoice/documents at the earliest so we can reconcile records.
 
-Regards,  
+Regards,
 Finance Team
 """
-                            yag.send(to=email, subject=subject, contents=body)
-                            sent += 1
-                    st.success(f"✅ {sent} email(s) sent successfully.")
-                except Exception as e:
-                    st.error(f"❌ Email sending failed: {e}")
-        else:
-            st.warning("Please provide Gmail ID and Password to send emails.")
+                            try:
+                                yag.send(to=email, subject=subject, contents=body)
+                                success_count += 1
+                            except Exception as e:
+                                st.warning(f"Failed to send email to {email}: {e}")
 
+                    st.success(f"✅ Emails sent successfully to {success_count} unmatched suppliers.")
+
+                except Exception as e:
+                    st.error(f"❌ Failed to authenticate Gmail SMTP: {e}")
